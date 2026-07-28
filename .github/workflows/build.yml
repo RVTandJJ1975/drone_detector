@@ -13,21 +13,23 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Set up Java
+        uses: actions/setup-java@v4
+        with:
+          distribution: 'temurin'
+          java-version: '17'
+
       - name: Set up Flutter
         uses: subosito/flutter-action@v2
         with:
-          flutter-version: '3.24.0'
+          flutter-version: '3.24.5'
           channel: 'stable'
           cache: true
 
-      - name: Create Flutter project structure
+      - name: Create platform folders
         run: |
-          flutter create --project-name drone_detector --org com.example temp_project
-          cp -r temp_project/android .
-          cp -r temp_project/ios .
-          cp -r temp_project/web . 2>/dev/null || true
-          cp temp_project/analysis_options.yaml . 2>/dev/null || true
-          rm -rf temp_project
+          flutter create --project-name drone_detector --org com.example --platforms=android .
+          # Keep our existing lib/ and pubspec.yaml (do not overwrite them)
 
       - name: Get dependencies
         run: flutter pub get
