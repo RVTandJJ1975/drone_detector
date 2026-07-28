@@ -3,8 +3,6 @@ name: Build APK
 
 on:
   workflow_dispatch:
-  push:
-    branches: [ main, master ]
 
 jobs:
   build:
@@ -12,6 +10,18 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Show what is in lib/main.dart
+        run: |
+          echo "===== FIRST 30 LINES OF lib/main.dart ====="
+          head -n 30 lib/main.dart
+          echo "==========================================="
+          if grep -q "DroneDetectorApp" lib/main.dart; then
+            echo "OK - Our Drone Detector code is present"
+          else
+            echo "ERROR - Demo code detected!"
+            exit 1
+          fi
 
       - name: Set up Java
         uses: actions/setup-java@v4
@@ -28,22 +38,26 @@ jobs:
 
       - name: Generate Android platform only
         run: |
-          # Create a temporary Flutter project just to get the android/ folder
           flutter create --project-name drone_detector --org com.example temp_app
-          # Copy only the Android platform files into our repo
           rm -rf android
           cp -r temp_app/android .
-          # Clean up
           rm -rf temp_app
+
+      - name: Verify source still correct after create
+        run: |
+          echo "===== CHECKING lib/main.dart AGAIN ====="
+          head -n 20 lib/main.dart
+          grep -q "DroneDetectorApp" lib/main.dart || (echo "Source was overwritten!" && exit 1)
 
       - name: Get dependencies
         run: flutter pub get
 
-      - name: Build APK
-        run: flutter build apk --release
+      - name: Build APK (explicit target)
+        run: flutter build apk --release -t lib/main.dart
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
           name: drone-detector-apk
           path: build/app/outputs/flutter-apk/app-release.apk
+Sent from my iPhone
