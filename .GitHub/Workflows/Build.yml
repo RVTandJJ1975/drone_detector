@@ -26,21 +26,15 @@ jobs:
           channel: 'stable'
           cache: true
 
-      - name: Backup our source
+      - name: Generate Android platform only
         run: |
-          mkdir -p /tmp/our_source
-          cp -r lib /tmp/our_source/
-          cp pubspec.yaml /tmp/our_source/
-
-      - name: Create Android platform files
-        run: |
-          flutter create --project-name drone_detector --org com.example --platforms=android .
-
-      - name: Restore our source
-        run: |
-          rm -rf lib
-          cp -r /tmp/our_source/lib .
-          cp /tmp/our_source/pubspec.yaml .
+          # Create a temporary Flutter project just to get the android/ folder
+          flutter create --project-name drone_detector --org com.example temp_app
+          # Copy only the Android platform files into our repo
+          rm -rf android
+          cp -r temp_app/android .
+          # Clean up
+          rm -rf temp_app
 
       - name: Get dependencies
         run: flutter pub get
