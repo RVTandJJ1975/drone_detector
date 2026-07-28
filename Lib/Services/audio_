@@ -1,0 +1,238 @@
+
+import 'dart:async';
+import 'dart:math';
+import 'dart:typed_data';
+import 'package:record/record.dart';
+import '../models/detection_event.dart';
+import 'settings_service.dart';
+
+class AudioDetectorService {
+  final AudioRecorder _recorder = AudioRecorder();
+  StreamSubscription<Uint8List>? _audioSub;
+
+  bool _isListening = false;
+  int _consecutiveHits = 0;
+  double _lastConfidence = 0.0;
+
+  List<double> latestSpectrum = List.filled(64, 0.0);
+  double latestRms = 0.0;
+
+  final _detectionController = StreamController<DetectionEvent>.broadcast();
+  final _spectrumController = StreamController<List<double>>.broadcast();
+  final _statusController = StreamController<DetectorStatus>.broadcast();
+
+  Stream<DetectionEvent> get onDetection => _detectionController.stream;
+  Stream<List<double>> get onSpectrum => _spectrumController.stream;
+  Stream<DetectorStatus> get onStatus => _statusController.stream;
+
+  bool get isListening => _isListening;
+
+  Future<bool> hasPermission() async {
+    return await _recorder.hasPermission();
+  }
+
+  Future<void> start() async {
+    if (_isListening) return;
+
+    final hasPerm = await hasPermission();
+    if (!hasPerm) {
+      _statusController.add(DetectorStatus.permissionDenied);
+      return;
+    }
+
+    final stream = await _recorder.startStream(
+      const RecordConfig(
+        encoder: AudioEncoder.pcm16bits,
+        sampleRate: 16000,
+        numChannels: 1,
+        bitRate: 256000,
+      ),
+    );
+
+    _isListening = true;
+    _statusController.add(DetectorStatus.listening);
+    _consecutiveHits = 0;
+
+    final buffer = <int>[];
+    const windowSamples = 16000;
+    const hopSamples = 8000;
+
+    _audioSub = stream.listen((chunk) {
+      for (int i = 0; i + 1 < chunk.length; i += 2) {
+        final sample = chunk[i] | (chunk[i + 1] << 8);
+        final signed = sample > 32767 ? sample - 65536 : sample;
+        buffer.add(signed);
+      }
+
+      while (buffer.length >= windowSamples) {
+        final window = buffer.sublist(0, windowSamples);
+        buffer.removeRange(0, hopSamples);
+        _processWindow(window);
+      }
+    }, onError: (e) {
+      _statusController.add(DetectorStatus.error);
+      stop();
+    });
+  }
+
+  Future<void> stop() async {
+    await _audioSub?.cancel();
+    _audioSub = null;
+    await _recorder.stop();
+    _isListening = false;
+    _consecutiveHits = 0;
+    _statusController.add(DetectorStatus.stopped);
+  }
+
+  void _processWindow(List<int> samples) {
+    double sumSq = 0;
+    for (final s in samples) {
+      sumSq += s * s;
+    }
+    final rms = sqrt(sumSq / samples.length) / 32768.0;
+    latestRms = rms;
+
+    final spectrum = _computeBandEnergies(samples);
+    latestSpectrum = spectrum;
+    _spectrumController.add(List.from(spectrum));
+
+    final confidence = _scoreDroneLikelihood(spectrum, rms);
+    _lastConfidence = confidence;
+
+    final threshold = 0.35 + (1.0 - SettingsService.sensitivity) * 0.45;
+
+    if (confidence >= threshold && rms > 0.01) {
+      _consecutiveHits++;
+    } else {
+      _consecutiveHits = max(0, _consecutiveHits - 1);
+    }
+
+    if (_consecutiveHits >= SettingsService.consecutiveRequired) {
+      final level = confidence > 0.75
+          ? 'high'
+          : confidence > 0.55
+              ? 'medium'
+              : 'low';
+
+      int peakBin = 0;
+      double peakVal = 0;
+      for (int i = 0; i < spectrum.length; i++) {
+        if (spectrum[i] > peakVal) {
+          peakVal = spectrum[i];
+          peakBin = i;
+        }
+      }
+      final peakHz = peakBin * 125.0 + 62.5;
+
+      final event = DetectionEvent(
+        timestamp: DateTime.now(),
+        confidence: confidence,
+        level: level,
+        peakFrequencyHz: peakHz,
+        relativeLoudness: rms,
+      );
+      _detectionController.add(event);
+
+      _consecutiveHits = SettingsService.consecutiveRequired ~/ 2;
+    }
+
+    _statusController.add(DetectorStatus(
+      state: DetectorState.listening,
+      confidence: confidence,
+      rms: rms,
+    ));
+  }
+
+  List<double> _computeBandEnergies(List<int> samples) {
+    const bands = 64;
+    final energies = List<double>.filled(bands, 0.0);
+    final n = samples.length;
+    final x = samples.map((s) => s / 32768.0).toList();
+
+    for (int b = 0; b < bands; b++) {
+      final fCenter = (b + 0.5) * 8000.0 / bands;
+      double energy = 0;
+      double phase = 0;
+      final omega = 2 * pi * fCenter / 16000.0;
+      for (int i = 0; i < n; i += 4) {
+        final sample = x[i];
+        energy += sample * sample * (0.5 + 0.5 * cos(phase));
+        phase += omega * 4;
+        if (phase > 2 * pi) phase -= 2 * pi;
+      }
+      energies[b] = energy;
+    }
+
+    final maxE = energies.reduce(max);
+    if (maxE > 1e-9) {
+      for (int i = 0; i < bands; i++) {
+        energies[i] = energies[i] / maxE;
+      }
+    }
+    return energies;
+  }
+
+  double _scoreDroneLikelihood(List<double> spectrum, double rms) {
+    if (rms < 0.008) return 0.0;
+
+    double midHigh = 0;
+    double low = 0;
+    double total = 0;
+    for (int i = 0; i < spectrum.length; i++) {
+      total += spectrum[i];
+      if (i < 10) {
+        low += spectrum[i];
+      } else if (i >= 12 && i <= 55) {
+        midHigh += spectrum[i];
+      }
+    }
+    if (total < 1e-6) return 0.0;
+
+    final midHighRatio = midHigh / total;
+    final lowRatio = low / total;
+
+    double score = 0.0;
+    score += midHighRatio * 1.4;
+    score -= lowRatio * 0.6;
+
+    int peaks = 0;
+    for (int i = 14; i < 50; i++) {
+      if (spectrum[i] > 0.35 &&
+          spectrum[i] >= spectrum[i - 1] &&
+          spectrum[i] >= spectrum[i + 1]) {
+        peaks++;
+      }
+    }
+    score += min(peaks, 6) * 0.08;
+    score += min(rms * 4.0, 0.25);
+
+    return score.clamp(0.0, 1.0);
+  }
+
+  void dispose() {
+    stop();
+    _detectionController.close();
+    _spectrumController.close();
+    _statusController.close();
+  }
+}
+
+enum DetectorState { stopped, listening, permissionDenied, error }
+
+class DetectorStatus {
+  final DetectorState state;
+  final double confidence;
+  final double rms;
+
+  const DetectorStatus({
+    this.state = DetectorState.stopped,
+    this.confidence = 0.0,
+    this.rms = 0.0,
+  });
+
+  static const stopped = DetectorStatus(state: DetectorState.stopped);
+  static const permissionDenied =
+      DetectorStatus(state: DetectorState.permissionDenied);
+  static const error = DetectorStatus(state: DetectorState.error);
+  static const listening = DetectorStatus(state: DetectorState.listening);
+}
