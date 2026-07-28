@@ -1,0 +1,42 @@
+
+name: Build APK
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Flutter
+        uses: subosito/flutter-action@v2
+        with:
+          flutter-version: '3.24.0'
+          channel: 'stable'
+          cache: true
+
+      - name: Create Flutter project structure
+        run: |
+          flutter create --project-name drone_detector --org com.example temp_project
+          cp -r temp_project/android .
+          cp -r temp_project/ios .
+          cp -r temp_project/web . 2>/dev/null || true
+          cp temp_project/analysis_options.yaml . 2>/dev/null || true
+          rm -rf temp_project
+
+      - name: Get dependencies
+        run: flutter pub get
+
+      - name: Build APK
+        run: flutter build apk --release
+
+      - name: Upload APK
+        uses: actions/upload-artifact@v4
+        with:
+          name: drone-detector-apk
+          path: build/app/outputs/flutter-apk/app-release.apk
