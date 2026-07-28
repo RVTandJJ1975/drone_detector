@@ -2,7 +2,7 @@
 name: Build APK
 
 on:
-  workflow_dispatch:
+  workflow_dispatch: {}
 
 jobs:
   build:
@@ -60,4 +60,3 @@ jobs:
         with:
           name: drone-detector-apk
           path: build/app/outputs/flutter-apk/app-release.apk
-Sent from my iPhone
